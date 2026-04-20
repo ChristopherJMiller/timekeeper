@@ -18,7 +18,7 @@ def iso_week_bounds(week_label: str | None) -> tuple[str, str, dt.date, dt.date]
     week_label is "YYYY-Www" (ISO). None = current week.
     """
     if week_label is None:
-        today = dt.date.today()
+        today = dt.datetime.now(dt.timezone.utc).date()
         iso_year, iso_week, _ = today.isocalendar()
     else:
         m = re.match(r"^(\d{4})-W(\d{1,2})$", week_label)
@@ -48,7 +48,7 @@ def _hours_line(
         by_client = {k: v for k, v in by_client.items() if k == client_filter}
     parts = []
     for name, (h, b) in sorted(by_client.items()):
-        if b:
+        if b is not None:
             parts.append(f"{name}: {h:.1f} / {b:.0f}h")
         else:
             parts.append(f"{name}: {h:.1f}h")

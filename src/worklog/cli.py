@@ -196,7 +196,7 @@ def status():
     with db.connect(cfg.db_path) as con:
         row = db.active_session(con)
         today_start = dt.datetime.combine(
-            dt.date.today(), dt.time.min, dt.timezone.utc
+            now.date(), dt.time.min, dt.timezone.utc
         ).isoformat()
         today_total = con.execute(
             "SELECT COALESCE(SUM(duration_s), 0) AS s FROM sessions "
@@ -359,7 +359,7 @@ def clients_archive(name):
 # report / doctor
 # ---------------------------------------------------------------------------
 
-@cli.command()
+@cli.command("report")
 @click.option("--week", default=None, help="ISO week (YYYY-Www); default current")
 @click.option("--client", default=None, help="Filter by client name")
 @click.option("--regenerate", is_flag=True, help="Force re-running the weekly LLM call")
@@ -376,10 +376,6 @@ def report_cmd(week, client, regenerate):
     except ValueError as e:
         raise click.ClickException(str(e)) from None
     click.echo(f"✎ {path}")
-
-
-# `report` collides with the imported module; expose as the subcommand name.
-cli.add_command(report_cmd, name="report")
 
 
 @cli.command()
@@ -447,12 +443,9 @@ def _install_hook(hooks_log: Path) -> None:
 # auth (system keychain)
 # ---------------------------------------------------------------------------
 
-@cli.group()
+@cli.group("auth")
 def auth_group():
     """Manage the LLM API key (stored in the system keychain)."""
-
-
-cli.add_command(auth_group, name="auth")
 
 
 @auth_group.command("set")

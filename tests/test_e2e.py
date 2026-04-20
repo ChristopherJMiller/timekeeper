@@ -18,14 +18,14 @@ AUTHOR_EMAIL = "dev@example.com"
 
 
 def _git(cwd: Path, *args: str, env_extra: dict | None = None) -> None:
-    env = {
+    env = os.environ.copy()
+    env.update({
         "GIT_AUTHOR_NAME": "Dev",
         "GIT_AUTHOR_EMAIL": AUTHOR_EMAIL,
         "GIT_COMMITTER_NAME": "Dev",
         "GIT_COMMITTER_EMAIL": AUTHOR_EMAIL,
         "HOME": str(cwd.parent),
-        "PATH": "/usr/bin:/bin:/usr/local/bin",
-    }
+    })
     if env_extra:
         env.update(env_extra)
     subprocess.run(("git", *args), cwd=cwd, check=True, env=env,

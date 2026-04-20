@@ -15,6 +15,23 @@ def test_github_token_redacted():
     assert "[REDACTED:github_token]" in out
 
 
+def test_bearer_full_header_redacted():
+    # Regression: previously the `\s*[:=]?\s*` + alphanumeric class could
+    # swallow "Authorization: Bearer" (21 chars) and leave the actual token
+    # exposed. The replacement anchor must consume through the token.
+    s = 'curl -H "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.abc.xyz" ...'
+    out = redact.scrub(s)
+    assert "eyJhbGciOiJIUzI1NiJ9.abc.xyz" not in out
+    assert "[REDACTED:bearer]" in out
+
+
+def test_bearer_without_authorization_header():
+    s = "token: Bearer abc123defg456"
+    out = redact.scrub(s)
+    assert "abc123defg456" not in out
+    assert "[REDACTED:bearer]" in out
+
+
 def test_env_secret_keeps_key_name():
     s = "DATABASE_PASSWORD=supersecret123\nOTHER=ok"
     out = redact.scrub(s)

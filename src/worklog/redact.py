@@ -28,7 +28,9 @@ PATTERNS: tuple[Pattern, ...] = (
     Pattern("slack_token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
     Pattern(
         "bearer",
-        re.compile(r"(?i)\b(Authorization|Bearer)\s*[:=]?\s*[A-Za-z0-9._\-]{20,}"),
+        re.compile(
+            r"(?i)(?:\bAuthorization\s*[:=]\s*(?:Bearer\s+)?\S+|\bBearer\s+[A-Za-z0-9._\-]{10,})"
+        ),
     ),
     Pattern(
         "env_secret",
