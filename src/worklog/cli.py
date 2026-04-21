@@ -24,6 +24,10 @@ def _parse_at(at: str | None, reference: dt.datetime) -> dt.datetime:
     at = at.strip()
     if re.match(r"^\d{1,2}:\d{2}$", at):
         hh, mm = (int(x) for x in at.split(":"))
+        if not (0 <= hh < 24 and 0 <= mm < 60):
+            raise click.BadParameter(
+                f"Bad --at value {at!r}: hour 0-23, minute 0-59"
+            )
         local = reference.astimezone().replace(
             hour=hh, minute=mm, second=0, microsecond=0
         )
@@ -74,6 +78,21 @@ def start(client, note, tag, at):
     now = dt.datetime.now(dt.timezone.utc)
     started_at = _parse_at(at, now)
     with db.connect(cfg.db_path) as con:
+        existing = db.active_session(con)
+        if existing is not None:
+            existing_started = dt.datetime.fromisoformat(existing["started_at"])
+            age_h = (now - existing_started).total_seconds() / 3600
+            if age_h >= AUTO_ABANDON_HOURS and click.confirm(
+                f"Active session started {age_h:.0f}h ago looks stale. "
+                f"Abandon it?",
+                default=True,
+            ):
+                db.abandon_active(con)
+            else:
+                raise click.ClickException(
+                    f"Already active since {existing['started_at']}. "
+                    f"Run `tk stop` or `tk abandon` first."
+                )
         client_id = _resolve_client(con, client)
         try:
             db.start_session(
@@ -152,7 +171,9 @@ def stop(at, no_summary, model, force):
         )
 
         if no_summary:
-            md = summarize.render_raw_session(ctx, git_ev, claude_recs)
+            md = summarize.render_raw_session(
+                ctx, git_ev, claude_recs, cfg.privacy.exclude_paths
+            )
         else:
             try:
                 md = summarize.summarize_session(
@@ -167,9 +188,11 @@ def stop(at, no_summary, model, force):
                     f"! LLM call failed ({e}). Falling back to raw evidence.",
                     err=True,
                 )
-                md = summarize.render_raw_session(ctx, git_ev, claude_recs)
+                md = summarize.render_raw_session(
+                    ctx, git_ev, claude_recs, cfg.privacy.exclude_paths
+                )
 
-        fname = started_at.astimezone().strftime("%Y-%m-%d-%H%M") + ".md"
+        fname = started_at.strftime("%Y-%m-%d-%H%M") + ".md"
         path = cfg.sessions_dir / fname
         path.write_text(md + "\n")
 
@@ -209,11 +232,17 @@ def status():
     started = dt.datetime.fromisoformat(row["started_at"])
     live = int((now - started).total_seconds())
     warn = " ⚠ long session" if live > LONG_SESSION_WARN_HOURS * 3600 else ""
+    stale_hint = (
+        f"\n  ! stale: started {live // 3600}h ago — consider `tk abandon`"
+        if live >= AUTO_ABANDON_HOURS * 3600
+        else ""
+    )
     click.echo(
         f"▶ active {_format_duration(live)}{warn}\n"
         f"  started: {row['started_at']}\n"
         f"  note:    {row['note'] or '-'}\n"
         f"  today closed: {_format_duration(today_total)}"
+        f"{stale_hint}"
     )
 
 

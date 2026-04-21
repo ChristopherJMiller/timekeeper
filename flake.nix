@@ -7,31 +7,12 @@
   };
 
   outputs = { self, nixpkgs, flake-utils }:
-    flake-utils.lib.eachDefaultSystem (system:
-      let
-        pkgs = import nixpkgs { inherit system; };
-        python = pkgs.python311;
-
-        # -------------------------------------------------------------------
-        # Runtime optimizations:
-        #
-        # 1. The `openai` and `keyring` packages are imported LAZILY inside
-        #    `worklog.summarize` and `worklog.auth`, so the hot-path commands
-        #    (`tk start`, `tk stop --no-summary`, `tk status`, `tk list`)
-        #    never pay their import cost (~200–400 ms combined).
-        #
-        # 2. We use `makeBinaryWrapper` instead of the default shell wrapper
-        #    around the entry point — saves ~5–15 ms per invocation on Linux
-        #    and avoids a bash exec.
-        #
-        # 3. `buildPythonApplication` precompiles `.pyc` files at install
-        #    time, so the first run doesn't pay compilation cost.
-        #
-        # 4. Only runtime deps (no dev tooling) end up in the closure of the
-        #    `tk` binary; pytest lives in the devShell only.
-        # -------------------------------------------------------------------
-
-        timekeeper = python.pkgs.buildPythonApplication {
+    let
+      # Exposed so `overlays.default` and the per-system outputs build the
+      # same derivation from a single source of truth.
+      mkTimekeeper = pkgs:
+        let python = pkgs.python312; in
+        python.pkgs.buildPythonApplication {
           pname = "timekeeper";
           version = "0.1.0";
           src = ./.;
@@ -56,8 +37,8 @@
 
           pythonImportsCheck = [ "worklog" "worklog.cli" ];
 
-          # Tests touch $HOME and spin up a temp git repo; run them in the
-          # devShell (`pytest`) rather than as part of the package build.
+          # Tests spin up a temp git repo and read $HOME; run them in the
+          # devShell (`pytest` / `nix flake check`) rather than during build.
           doCheck = false;
 
           meta = with pkgs.lib; {
@@ -68,13 +49,32 @@
           };
         };
 
-        devEnv = python.withPackages (ps: with ps; [
+      # Overlay lets downstream NixOS configs do:
+      #   nixpkgs.overlays = [ inputs.timekeeper.overlays.default ];
+      #   environment.systemPackages = [ pkgs.timekeeper ];
+      overlay = final: prev: {
+        timekeeper = mkTimekeeper final;
+      };
+    in
+    {
+      overlays.default = overlay;
+    }
+    //
+    flake-utils.lib.eachDefaultSystem (system:
+      let
+        pkgs = import nixpkgs { inherit system; };
+        python = pkgs.python312;
+        timekeeper = mkTimekeeper pkgs;
+
+        # Runtime deps + pytest. Used for the dev shell and `nix flake check`.
+        devPython = python.withPackages (ps: with ps; [
           click
           openai
           keyring
           pytest
         ]);
-      in {
+      in
+      {
         packages = {
           default = timekeeper;
           timekeeper = timekeeper;
@@ -86,11 +86,34 @@
         };
 
         devShells.default = pkgs.mkShell {
-          packages = [ devEnv pkgs.git pkgs.jq ];
+          packages = [
+            devPython
+            pkgs.git
+            pkgs.jq
+          ];
           shellHook = ''
             export PYTHONPATH="$PWD/src:$PYTHONPATH"
             echo "timekeeper dev shell — pytest | python -m worklog.cli --help"
           '';
+        };
+
+        # `nix flake check` runs pytest in a sandboxed build. Git has no
+        # global config in the sandbox, so tests aren't affected by the
+        # user's commit.gpgsign / signing setup.
+        checks.default = pkgs.stdenv.mkDerivation {
+          name = "timekeeper-pytest";
+          src = ./.;
+          nativeBuildInputs = [ devPython pkgs.git ];
+          dontBuild = true;
+          doCheck = true;
+          checkPhase = ''
+            runHook preCheck
+            export HOME=$TMPDIR
+            export PYTHONPATH=$PWD/src:$PYTHONPATH
+            pytest -q
+            runHook postCheck
+          '';
+          installPhase = "mkdir -p $out && touch $out/ok";
         };
       });
 }

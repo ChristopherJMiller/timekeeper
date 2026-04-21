@@ -20,6 +20,10 @@ def _run(repo: Path, *args: str, env: dict | None = None) -> None:
         "GIT_COMMITTER_NAME": AUTHOR_NAME,
         "GIT_COMMITTER_EMAIL": AUTHOR_EMAIL,
         "HOME": str(repo.parent),
+        # Isolate from the user's global/system git config (commit.gpgsign,
+        # default branch, hooks path, etc.) so tests are deterministic.
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
     })
     if env:
         full_env.update(env)

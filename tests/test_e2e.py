@@ -25,6 +25,10 @@ def _git(cwd: Path, *args: str, env_extra: dict | None = None) -> None:
         "GIT_COMMITTER_NAME": "Dev",
         "GIT_COMMITTER_EMAIL": AUTHOR_EMAIL,
         "HOME": str(cwd.parent),
+        # Isolate from the user's global/system git config (gpgsign etc.)
+        # so tests don't inherit signing keys or custom hooks.
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
     })
     if env_extra:
         env.update(env_extra)
@@ -167,6 +171,59 @@ def test_no_summary_still_writes_file(isolated_worklog):
     assert len(sessions) == 1
     # Raw fallback header
     assert "# Session (raw)" in sessions[0].read_text()
+
+
+def test_no_summary_redacts_configured_paths(tmp_path, monkeypatch):
+    """Regression: `tk stop --no-summary` must honor privacy.exclude_paths.
+
+    The raw markdown feeds into `tk report`, which does go to the LLM.
+    If paths aren't redacted here, they leak on the weekly rollup.
+    """
+    cfg_path = tmp_path / "config.toml"
+    output_dir = tmp_path / "worklog"
+    data_dir = tmp_path / "data"
+    repo = tmp_path / "repo"
+
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", AUTHOR_EMAIL)
+    _git(repo, "config", "user.name", "Dev")
+
+    cfg_path.write_text(textwrap.dedent(f"""
+        author = "{AUTHOR_EMAIL}"
+        output_dir = "{output_dir}"
+        api_base_url = "https://example.invalid/v1"
+        session_model = "m-s"
+        weekly_model  = "m-w"
+        repos = ["{repo}"]
+
+        [privacy]
+        redact_secrets = true
+        exclude_paths = [".env", "secrets/"]
+    """).strip())
+
+    monkeypatch.setenv("WORKLOG_CONFIG", str(cfg_path))
+    monkeypatch.setenv("WORKLOG_DATA", str(data_dir))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-abcdef")
+
+    (repo / ".env").write_text("A=1\n")
+    (repo / "secrets").mkdir()
+    (repo / "secrets" / "creds.json").write_text("{\"k\":\"v\"}\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "seed sensitive files")
+
+    runner = CliRunner()
+    r1 = runner.invoke(cli.cli, ["start"])
+    assert r1.exit_code == 0, r1.output
+    r2 = runner.invoke(cli.cli, ["stop", "--no-summary"])
+    assert r2.exit_code == 0, r2.output
+
+    written = list((output_dir / "sessions").glob("*.md"))
+    assert len(written) == 1
+    body = written[0].read_text()
+    assert "[REDACTED:path:.env]" in body
+    assert "[REDACTED:path:secrets/]" in body
+    assert "secrets/creds.json" not in body
 
 
 def test_long_session_warning_requires_confirm(isolated_worklog):

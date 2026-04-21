@@ -278,8 +278,14 @@ def render_raw_session(
     ctx: SessionContext,
     git: GitEvidence,
     claude: list[ClaudeRecord],
+    exclude_paths: list[str] | None = None,
 ) -> str:
-    """Fallback when --no-summary is set: emit the evidence as-is."""
+    """Fallback when --no-summary is set: emit the evidence as-is.
+
+    `exclude_paths` is threaded through to `scrub_all` so the raw markdown
+    on disk honors the same path-redaction rules as a summarized session —
+    the file is later fed to the weekly rollup, which does go to the LLM.
+    """
     duration_min = int((ctx.stopped - ctx.started).total_seconds() // 60)
     header = textwrap.dedent(
         f"""\
@@ -294,4 +300,6 @@ def render_raw_session(
         # Session (raw)
         """
     )
-    return header + "\n" + build_session_user_prompt(ctx, git, claude, [])
+    return header + "\n" + build_session_user_prompt(
+        ctx, git, claude, exclude_paths
+    )
