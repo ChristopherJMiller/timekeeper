@@ -60,12 +60,81 @@ tk report                          # current ISO week → ~/worklog/weekly/…md
 | `tk status` | Active session + today's closed total |
 | `tk list [--limit N]` | Recent sessions, one per line |
 | `tk show <id>` | Print a session's markdown |
-| `tk edit <id> [--started T] [--stopped T] [--client N] [--note T]` | Backfill / fix |
+| `tk edit <id>` | Open a curses TUI to reassign client, fix times, edit note/tags |
+| `tk edit <id> [--started T] [--stopped T] [--client N] [--note T]` | Non-interactive edit (scriptable) |
 | `tk abandon` | Drop the active session without summarizing |
+| `tk note add <text> [--session ID]` | Attach a note (calls, planning, manual work not in commits) |
+| `tk note list [--session ID]` | List notes attached to a session |
+| `tk note rm <note_id>` | Delete a note |
 | `tk report [--week YYYY-Www] [--client NAME] [--regenerate]` | Weekly rollup |
 | `tk clients {add,list,update,archive}` | Manage clients |
 | `tk auth {set,status,clear}` | Manage the API key in the keychain |
+| `tk completion {bash,zsh,fish}` | Print a tab-completion script for the shell |
 | `tk doctor [--install-hook]` | Verify config + optionally install the Claude Code Stop hook |
+
+## Tab completion
+
+The Nix build installs shell completion scripts automatically:
+
+- **bash:** `~/.nix-profile/share/bash-completion/completions/tk.bash`
+- **zsh:** `~/.nix-profile/share/zsh/site-functions/_tk`
+- **fish:** `~/.nix-profile/share/fish/vendor_completions.d/tk.fish`
+
+For pip installs (or ad-hoc sourcing), emit the script yourself:
+
+```sh
+# bash
+eval "$(tk completion bash)"
+
+# zsh
+eval "$(tk completion zsh)"
+
+# fish
+tk completion fish > ~/.config/fish/completions/tk.fish
+```
+
+Completion pulls live values from your db: session IDs on `tk show`, `tk
+edit`, `tk note add --session`; client names on `tk start -c`, `tk clients
+update/archive`, `tk report --client`; and existing weekly labels on `tk
+report --week`.
+
+## Editing a session (TUI)
+
+```sh
+tk edit 42                 # opens the curses form
+```
+
+Keys: ↑/↓ to move, Enter to edit a field (Enter on "Client" opens a picker
+populated from `tk clients`), `n` to add a manual note, `d` to delete the
+highlighted note, `S` to save, `q`/Esc to cancel.
+
+Note adds/deletes persist immediately; field edits (client, times, note,
+tags) only persist on `S`.
+
+Pass any of `--started`, `--stopped`, `--client`, `--note` to skip the TUI
+and edit non-interactively (scriptable).
+
+## Manual notes
+
+`tk note add` captures work that isn't in your commits — phone calls,
+planning sessions, manual deploys, whiteboarding. Notes are attached to a
+session and surface in three places:
+
+1. **At `tk stop`:** they're passed to the LLM as primary evidence, so the
+   session summary reflects the full scope of work, not just code diffs.
+2. **On closed sessions:** added notes are appended to the session's
+   markdown file under `## Additional notes`, so the weekly rollup (which
+   re-reads session markdown) picks them up on its next run.
+3. **Via `tk show`:** active sessions without a summary yet display their
+   accumulated notes.
+
+```sh
+tk start -c acme -n "ship the webhook retry work"
+tk note add "45-min planning call with platform team — agreed on retry budget 3"
+# … commits, more work …
+tk note add "manually replayed 142 stuck events from staging queue"
+tk stop             # LLM sees both notes alongside the git evidence
+```
 
 ## How evidence is collected
 

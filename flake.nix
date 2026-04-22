@@ -20,6 +20,7 @@
 
           nativeBuildInputs = [
             pkgs.makeBinaryWrapper
+            pkgs.installShellFiles
           ] ++ (with python.pkgs; [ setuptools wheel ]);
 
           propagatedBuildInputs = with python.pkgs; [
@@ -34,6 +35,15 @@
           makeWrapperArgs = [
             "--prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.git pkgs.jq ]}"
           ];
+
+          # Generate shell completions via click's `_TK_COMPLETE=<shell>_source`
+          # protocol. Runs after wrapping so the wrapped `tk` is on PATH.
+          postInstall = ''
+            installShellCompletion --cmd tk \
+              --bash <(_TK_COMPLETE=bash_source $out/bin/tk) \
+              --zsh  <(_TK_COMPLETE=zsh_source  $out/bin/tk) \
+              --fish <(_TK_COMPLETE=fish_source $out/bin/tk)
+          '';
 
           pythonImportsCheck = [ "worklog" "worklog.cli" ];
 

@@ -37,6 +37,14 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active
     ON sessions(status) WHERE status = 'active';
+
+CREATE TABLE IF NOT EXISTS session_notes (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    added_at   TEXT    NOT NULL,
+    text       TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_notes_session ON session_notes(session_id);
 """
 
 
@@ -205,3 +213,51 @@ def update_session(
                 "UPDATE sessions SET duration_s=? WHERE id=?",
                 (int((e - s).total_seconds()), session_id),
             )
+
+
+def update_session_tags(
+    con: sqlite3.Connection, session_id: int, tags: list[str]
+) -> None:
+    con.execute(
+        "UPDATE sessions SET tags=? WHERE id=?",
+        (",".join(tags) if tags else None, session_id),
+    )
+
+
+# ---------------------------------------------------------------------------
+# notes
+# ---------------------------------------------------------------------------
+
+def add_note(
+    con: sqlite3.Connection,
+    session_id: int,
+    text: str,
+    added_at: str | None = None,
+) -> int:
+    cur = con.execute(
+        "INSERT INTO session_notes(session_id, added_at, text) VALUES (?, ?, ?)",
+        (session_id, added_at or iso_utc(), text),
+    )
+    return cur.lastrowid
+
+
+def list_notes(
+    con: sqlite3.Connection, session_id: int
+) -> list[sqlite3.Row]:
+    return list(
+        con.execute(
+            "SELECT * FROM session_notes WHERE session_id=? ORDER BY added_at, id",
+            (session_id,),
+        )
+    )
+
+
+def get_note(con: sqlite3.Connection, note_id: int) -> sqlite3.Row | None:
+    return con.execute(
+        "SELECT * FROM session_notes WHERE id=?", (note_id,)
+    ).fetchone()
+
+
+def delete_note(con: sqlite3.Connection, note_id: int) -> int:
+    cur = con.execute("DELETE FROM session_notes WHERE id=?", (note_id,))
+    return cur.rowcount

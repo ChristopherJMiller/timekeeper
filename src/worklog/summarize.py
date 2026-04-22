@@ -33,6 +33,8 @@ numbers that aren't in the evidence.
 - Omit activity-only statements ("spent time investigating X") unless they produced a decision \
 or blocker worth surfacing.
 - If evidence is thin (few commits, mostly WIP), say so plainly — do not pad.
+- If a "Manual notes" section is present, treat those notes as primary evidence — the contractor \
+added them to capture work that isn't visible in commits (calls, planning, manual deploys).
 - Do NOT mention AI tooling, Claude Code, or how the work was done.
 
 Output format (strict):
@@ -105,6 +107,7 @@ class SessionContext:
     stopped: dt.datetime
     note: str | None
     tags: list[str]
+    manual_notes: list[tuple[str, str]] | None = None  # [(added_at_iso, text), …]
 
 
 def _format_commit(c: Commit) -> str:
@@ -180,6 +183,16 @@ def build_session_user_prompt(
     if claude_block:
         blocks.append("")
         blocks.append(claude_block)
+
+    if ctx.manual_notes:
+        blocks.append("")
+        blocks.append(
+            "## Manual notes\n"
+            "_Added by the contractor; cover work not visible in commits "
+            "(calls, planning, manual steps). Treat as primary evidence._"
+        )
+        for at, text in ctx.manual_notes:
+            blocks.append(f"- {at}: {text}")
 
     raw = "\n\n".join(blocks)
     return redact.scrub_all(raw, exclude_paths or [])

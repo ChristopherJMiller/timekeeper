@@ -9,12 +9,69 @@ import sys
 from pathlib import Path
 
 import click
+from click.shell_completion import CompletionItem
 
 from . import auth, collect_claude, collect_git, config, db, report, summarize
 
 
 LONG_SESSION_WARN_HOURS = 4
 AUTO_ABANDON_HOURS = 12
+
+
+# ---------------------------------------------------------------------------
+# shell completion helpers
+#
+# These run inside a forked `tk` process when the user hits <TAB>. They must
+# swallow every exception — a raised error would print a stack trace into the
+# user's shell. Return [] on any failure and let completion silently no-op.
+# ---------------------------------------------------------------------------
+
+def _complete_session_ids(ctx, param, incomplete):
+    try:
+        cfg = config.load()
+        with db.connect(cfg.db_path) as con:
+            rows = db.recent_sessions(con, limit=50)
+    except Exception:
+        return []
+    out: list[CompletionItem] = []
+    for r in rows:
+        sid = str(r["id"])
+        if not sid.startswith(incomplete):
+            continue
+        when = (r["started_at"] or "")[:16].replace("T", " ")
+        client = r["client_name"] or "-"
+        note = (r["note"] or "").replace("\n", " ")[:40]
+        out.append(CompletionItem(sid, help=f"{when} [{client}] {note}".strip()))
+    return out
+
+
+def _complete_client_names(ctx, param, incomplete):
+    try:
+        cfg = config.load()
+        with db.connect(cfg.db_path) as con:
+            rows = db.list_clients(con)
+    except Exception:
+        return []
+    return [
+        CompletionItem(
+            r["name"],
+            help="archived" if not r["active"] else "",
+        )
+        for r in rows
+        if r["name"].startswith(incomplete)
+    ]
+
+
+def _complete_weeks(ctx, param, incomplete):
+    try:
+        cfg = config.load()
+        labels = sorted(
+            (p.stem for p in cfg.weekly_dir.glob("*-W*.md")),
+            reverse=True,
+        )
+    except Exception:
+        return []
+    return [CompletionItem(lbl) for lbl in labels if lbl.startswith(incomplete)]
 
 
 def _parse_at(at: str | None, reference: dt.datetime) -> dt.datetime:
@@ -68,7 +125,11 @@ def cli():
 # ---------------------------------------------------------------------------
 
 @cli.command()
-@click.option("--client", "-c", default=None, help="Client name (see `tk clients`)")
+@click.option(
+    "--client", "-c", default=None,
+    help="Client name (see `tk clients`)",
+    shell_complete=_complete_client_names,
+)
 @click.option("--note", "-n", default=None, help="What you plan to work on")
 @click.option("--tag", "-t", multiple=True, help="Context tags; repeatable")
 @click.option("--at", default=None, help="Backfill start time (HH:MM or ISO)")
@@ -162,12 +223,16 @@ def stop(at, no_summary, model, force):
             cfg.hooks_log_path, started_at, stopped_at
         )
 
+        note_rows = db.list_notes(con, row["id"])
+        manual_notes = [(n["added_at"], n["text"]) for n in note_rows]
+
         ctx = summarize.SessionContext(
             client_name=client_name,
             started=started_at,
             stopped=stopped_at,
             note=row["note"],
             tags=[t for t in (row["tags"] or "").split(",") if t],
+            manual_notes=manual_notes or None,
         )
 
         if no_summary:
@@ -265,32 +330,67 @@ def list_cmd(limit):
 
 
 @cli.command()
-@click.argument("session_id", type=int)
+@click.argument("session_id", type=int, shell_complete=_complete_session_ids)
 def show(session_id):
     """Print a session's markdown summary."""
     cfg = config.load()
     with db.connect(cfg.db_path) as con:
         row = db.get_session(con, session_id)
-    if row is None:
-        raise click.ClickException(f"No session {session_id}.")
-    if not row["summary_path"] or not Path(row["summary_path"]).exists():
-        raise click.ClickException(f"No summary file for session {session_id}.")
-    click.echo(Path(row["summary_path"]).read_text())
+        if row is None:
+            raise click.ClickException(f"No session {session_id}.")
+        notes = db.list_notes(con, session_id)
+    if row["summary_path"] and Path(row["summary_path"]).exists():
+        click.echo(Path(row["summary_path"]).read_text())
+        return
+    # Active / abandoned sessions have no summary file — show header + notes.
+    click.echo(f"# Session {session_id} ({row['status']})")
+    click.echo(f"started: {row['started_at']}")
+    if row["note"]:
+        click.echo(f"note: {row['note']}")
+    if notes:
+        click.echo(_render_notes_section(notes))
+    elif row["status"] != "closed":
+        click.echo("(no summary yet)")
 
 
 @cli.command()
-@click.argument("session_id", type=int)
+@click.argument("session_id", type=int, shell_complete=_complete_session_ids)
 @click.option("--started", default=None)
 @click.option("--stopped", default=None)
-@click.option("--client", default=None)
+@click.option(
+    "--client", default=None, shell_complete=_complete_client_names,
+)
 @click.option("--note", default=None)
-def edit(session_id, started, stopped, client, note):
-    """Edit a session's timestamps, client, or note."""
+@click.option(
+    "--tui/--no-tui", default=None,
+    help="Force TUI on or off (default: TUI when no field flags are given).",
+)
+def edit(session_id, started, stopped, client, note, tui):
+    """Edit a session's timestamps, client, note, or tags.
+
+    With no field options, launches an interactive TUI. Pass any of
+    --started / --stopped / --client / --note to edit non-interactively
+    (suitable for scripts).
+    """
     cfg = config.load()
     now = dt.datetime.now(dt.timezone.utc)
+    any_flag = any(v is not None for v in (started, stopped, client, note))
+    use_tui = tui if tui is not None else not any_flag
+
     with db.connect(cfg.db_path) as con:
         if db.get_session(con, session_id) is None:
             raise click.ClickException(f"No session {session_id}.")
+
+    if use_tui:
+        from . import tui as tui_mod  # lazy: curses import only when needed
+        changed = tui_mod.run_edit(cfg, session_id)
+        if changed:
+            click.echo(f"edited session {session_id}")
+        else:
+            click.echo(f"no changes to session {session_id}")
+        return
+
+    with db.connect(cfg.db_path) as con:
         started_iso = (
             _parse_at(started, now).isoformat() if started is not None else None
         )
@@ -318,6 +418,120 @@ def abandon():
     if n == 0:
         raise click.ClickException("No active session.")
     click.echo("✗ abandoned active session")
+
+
+# ---------------------------------------------------------------------------
+# notes — capture work not visible in commits (calls, planning, manual steps)
+# ---------------------------------------------------------------------------
+
+NOTES_SECTION_HEADER = "## Additional notes"
+_NOTES_SECTION_RE = re.compile(
+    rf"\n{re.escape(NOTES_SECTION_HEADER)}\n(?:.*)\Z", re.DOTALL
+)
+
+
+def _render_notes_section(rows) -> str:
+    """Render the '## Additional notes' block appended to closed-session markdown."""
+    if not rows:
+        return ""
+    lines = ["", NOTES_SECTION_HEADER, ""]
+    for r in rows:
+        when = r["added_at"][:16].replace("T", " ")
+        text = r["text"].replace("\n", " ")
+        lines.append(f"- _{when}_ — {text}")
+    return "\n".join(lines) + "\n"
+
+
+def _rewrite_notes_section(path: Path, note_rows) -> None:
+    """Replace or append the additional-notes block in the session's md file."""
+    if not path.exists():
+        return
+    body = path.read_text()
+    stripped = _NOTES_SECTION_RE.sub("", body).rstrip()
+    new_section = _render_notes_section(note_rows)
+    if new_section:
+        stripped = stripped + "\n" + new_section
+    path.write_text(stripped + ("\n" if not stripped.endswith("\n") else ""))
+
+
+def _resolve_note_target(
+    con: sqlite3.Connection, session_id: int | None
+) -> sqlite3.Row:
+    if session_id is not None:
+        row = db.get_session(con, session_id)
+        if row is None:
+            raise click.ClickException(f"No session {session_id}.")
+        return row
+    row = db.active_session(con)
+    if row is None:
+        raise click.ClickException(
+            "No active session. Pass --session ID to target a closed one."
+        )
+    return row
+
+
+@cli.group("note")
+def note_group():
+    """Attach free-form notes to a session (calls, planning, manual work)."""
+
+
+@note_group.command("add")
+@click.argument("text")
+@click.option(
+    "--session", "session_id", type=int, default=None,
+    shell_complete=_complete_session_ids,
+    help="Target a specific session; defaults to the active one.",
+)
+def note_add(text, session_id):
+    """Add a note to the active session (or --session ID)."""
+    text = text.strip()
+    if not text:
+        raise click.ClickException("empty note — nothing added")
+    cfg = config.load()
+    with db.connect(cfg.db_path) as con:
+        row = _resolve_note_target(con, session_id)
+        note_id = db.add_note(con, row["id"], text)
+        rows = db.list_notes(con, row["id"])
+        if row["status"] == "closed" and row["summary_path"]:
+            _rewrite_notes_section(Path(row["summary_path"]), rows)
+    click.echo(f"+ note {note_id} → session {row['id']}")
+
+
+@note_group.command("list")
+@click.option(
+    "--session", "session_id", type=int, default=None,
+    shell_complete=_complete_session_ids,
+)
+def note_list(session_id):
+    """List notes attached to a session."""
+    cfg = config.load()
+    with db.connect(cfg.db_path) as con:
+        row = _resolve_note_target(con, session_id)
+        rows = db.list_notes(con, row["id"])
+    if not rows:
+        click.echo(f"no notes on session {row['id']}")
+        return
+    for r in rows:
+        when = r["added_at"][:16].replace("T", " ")
+        click.echo(f"{r['id']:>4}  {when}  {r['text']}")
+
+
+@note_group.command("rm")
+@click.argument("note_id", type=int)
+def note_rm(note_id):
+    """Delete a note by ID."""
+    cfg = config.load()
+    with db.connect(cfg.db_path) as con:
+        row = db.get_note(con, note_id)
+        if row is None:
+            raise click.ClickException(f"No note {note_id}.")
+        session_id = row["session_id"]
+        db.delete_note(con, note_id)
+        session = db.get_session(con, session_id)
+        rows = db.list_notes(con, session_id)
+        if session and session["status"] == "closed" and session["summary_path"]:
+            _rewrite_notes_section(Path(session["summary_path"]), rows)
+    click.echo(f"- note {note_id}")
 
 
 # ---------------------------------------------------------------------------
@@ -358,7 +572,7 @@ def clients_list():
 
 
 @clients.command("update")
-@click.argument("name")
+@click.argument("name", shell_complete=_complete_client_names)
 @click.option("--budget", type=float, default=None)
 @click.option("--rate", type=float, default=None)
 def clients_update(name, budget, rate):
@@ -373,7 +587,7 @@ def clients_update(name, budget, rate):
 
 
 @clients.command("archive")
-@click.argument("name")
+@click.argument("name", shell_complete=_complete_client_names)
 def clients_archive(name):
     cfg = config.load()
     with db.connect(cfg.db_path) as con:
@@ -389,8 +603,14 @@ def clients_archive(name):
 # ---------------------------------------------------------------------------
 
 @cli.command("report")
-@click.option("--week", default=None, help="ISO week (YYYY-Www); default current")
-@click.option("--client", default=None, help="Filter by client name")
+@click.option(
+    "--week", default=None, help="ISO week (YYYY-Www); default current",
+    shell_complete=_complete_weeks,
+)
+@click.option(
+    "--client", default=None, help="Filter by client name",
+    shell_complete=_complete_client_names,
+)
 @click.option("--regenerate", is_flag=True, help="Force re-running the weekly LLM call")
 def report_cmd(week, client, regenerate):
     """Produce the weekly boss-ready report."""
@@ -515,6 +735,35 @@ def auth_clear():
     """Remove the API key from the keychain."""
     auth.clear_api_key()
     click.echo("✓ cleared key from keychain")
+
+
+# ---------------------------------------------------------------------------
+# completion
+# ---------------------------------------------------------------------------
+
+_COMPLETION_HINTS = {
+    "bash": "Add to ~/.bashrc:  eval \"$(tk completion bash)\"",
+    "zsh":  "Add to ~/.zshrc:   eval \"$(tk completion zsh)\"",
+    "fish": "Save to:           tk completion fish > ~/.config/fish/completions/tk.fish",
+}
+
+
+@cli.command("completion")
+@click.argument("shell", type=click.Choice(["bash", "zsh", "fish"]))
+def completion_cmd(shell):
+    """Emit a tab-completion script for the named shell.
+
+    The Nix flake installs these automatically into system completion
+    directories. Use this command for pip installs or ad-hoc sourcing.
+    """
+    from click.shell_completion import shell_complete
+    # Delegate to click's internal generator by setting the env var it reads.
+    os.environ["_TK_COMPLETE"] = f"{shell}_source"
+    try:
+        shell_complete(cli, {}, "tk", "_TK_COMPLETE", f"{shell}_source")
+    finally:
+        os.environ.pop("_TK_COMPLETE", None)
+    click.echo(f"\n# {_COMPLETION_HINTS[shell]}", err=True)
 
 
 if __name__ == "__main__":
