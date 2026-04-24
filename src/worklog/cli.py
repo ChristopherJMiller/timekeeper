@@ -602,6 +602,34 @@ def clients_archive(name):
 # report / doctor
 # ---------------------------------------------------------------------------
 
+@cli.command("hours")
+@click.option(
+    "--week", default=None, help="ISO week (YYYY-Www); default current",
+    shell_complete=_complete_weeks,
+)
+@click.option(
+    "--client", default=None, help="Filter by client name",
+    shell_complete=_complete_client_names,
+)
+def hours_cmd(week, client):
+    """Print a week's time breakdown (total, per-client, per-day). No LLM call."""
+    cfg = config.load()
+    try:
+        start_iso, end_iso, monday, sunday = report.iso_week_bounds(week)
+    except ValueError as e:
+        raise click.ClickException(str(e)) from None
+    with db.connect(cfg.db_path) as con:
+        client_id: int | None = None
+        if client:
+            row = db.get_client_by_name(con, client)
+            if row is None:
+                raise click.ClickException(f"Unknown client: {client}")
+            client_id = row["id"]
+        sessions = db.sessions_in_range(con, start_iso, end_iso, client_id=client_id)
+    click.echo(f"# Week of {monday.isoformat()} to {sunday.isoformat()}\n")
+    click.echo(report.build_time_breakdown(sessions, monday, client))
+
+
 @cli.command("report")
 @click.option(
     "--week", default=None, help="ISO week (YYYY-Www); default current",

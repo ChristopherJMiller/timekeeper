@@ -165,3 +165,146 @@ def test_generate_weekly_unknown_client_raises(cfg):
         report.generate_weekly(
             cfg, week_label="2026-W17", client_filter="Missing"
         )
+
+
+def test_build_time_breakdown_totals_and_per_day():
+    monday = dt.date(2026, 4, 20)
+    rows = [
+        {
+            "client_name": "Acme",
+            "duration_s": 3600,
+            "hours_budget_weekly": 10.0,
+            "started_at": "2026-04-20T10:00:00+00:00",
+        },
+        {
+            "client_name": "Acme",
+            "duration_s": 5400,
+            "hours_budget_weekly": 10.0,
+            "started_at": "2026-04-22T09:00:00+00:00",
+        },
+        {
+            "client_name": None,
+            "duration_s": 1800,
+            "hours_budget_weekly": None,
+            "started_at": "2026-04-22T14:00:00+00:00",
+        },
+    ]
+    md = report.build_time_breakdown(rows, monday)
+    assert "Total:** 3.0h across 3 sessions" in md
+    assert "Acme: 2.5h / 10h (25%)" in md
+    assert "unassigned: 0.5h" in md
+    assert "Mon 2026-04-20: 1.0h" in md
+    assert "Wed 2026-04-22: 2.0h" in md
+    assert "Tue 2026-04-21: —" in md
+    assert "Sun 2026-04-26: —" in md
+
+
+def test_build_time_breakdown_single_session_and_empty():
+    monday = dt.date(2026, 4, 20)
+    assert "0 sessions" in report.build_time_breakdown([], monday)
+    rows = [
+        {
+            "client_name": "Solo",
+            "duration_s": 7200,
+            "hours_budget_weekly": None,
+            "started_at": "2026-04-21T08:00:00+00:00",
+        }
+    ]
+    md = report.build_time_breakdown(rows, monday)
+    assert "1 session" in md and "1 sessions" not in md
+
+
+def test_build_time_breakdown_client_filter():
+    monday = dt.date(2026, 4, 20)
+    rows = [
+        {
+            "client_name": "Acme",
+            "duration_s": 3600,
+            "hours_budget_weekly": None,
+            "started_at": "2026-04-20T10:00:00+00:00",
+        },
+        {
+            "client_name": "Beta",
+            "duration_s": 1800,
+            "hours_budget_weekly": None,
+            "started_at": "2026-04-20T12:00:00+00:00",
+        },
+    ]
+    md = report.build_time_breakdown(rows, monday, client_filter="Acme")
+    assert "Acme: 1.0h" in md
+    assert "Beta" not in md
+    assert "Total:** 1.0h across 1 session" in md
+
+
+def test_generate_weekly_includes_breakdown_and_session_detail(cfg, monkeypatch):
+    sess_md = cfg.sessions_dir / "s.md"
+    sess_md.write_text("# session marker — RAW-CONTENT-XYZ\nwork detail line\n")
+
+    with db.connect(cfg.db_path) as con:
+        cid = db.upsert_client(con, name="Acme", hours_budget_weekly=10.0)
+        sid = db.start_session(
+            con,
+            started_at="2026-04-21T10:00:00+00:00",
+            client_id=cid,
+            note=None,
+            tags=None,
+        )
+        db.close_session(
+            con,
+            session_id=sid,
+            stopped_at="2026-04-21T11:00:00+00:00",
+            duration_s=3600,
+            summary_path=str(sess_md),
+        )
+
+    monkeypatch.setattr(
+        "worklog.summarize.summarize_weekly",
+        lambda *a, **kw: "# LLM rollup\ncompressed bullet\n",
+    )
+
+    text = report.generate_weekly(cfg, week_label="2026-W17").read_text()
+
+    assert "# LLM rollup" in text
+    assert "## Time breakdown" in text
+    assert "Acme: 1.0h / 10h (10%)" in text
+    assert "Tue 2026-04-21: 1.0h" in text
+    assert "## Session detail" in text
+    assert "RAW-CONTENT-XYZ" in text
+    # Rollup stays above the breakdown, which stays above the appendix.
+    assert (
+        text.index("LLM rollup")
+        < text.index("Time breakdown")
+        < text.index("Session detail")
+    )
+
+
+def test_generate_weekly_llm_failure_still_includes_breakdown(cfg, monkeypatch):
+    sess_md = cfg.sessions_dir / "s.md"
+    sess_md.write_text("# raw evidence\n")
+
+    with db.connect(cfg.db_path) as con:
+        sid = db.start_session(
+            con,
+            started_at="2026-04-22T10:00:00+00:00",
+            client_id=None,
+            note=None,
+            tags=None,
+        )
+        db.close_session(
+            con,
+            session_id=sid,
+            stopped_at="2026-04-22T12:00:00+00:00",
+            duration_s=7200,
+            summary_path=str(sess_md),
+        )
+
+    def boom(*a, **kw):
+        raise RuntimeError("no api key")
+
+    monkeypatch.setattr("worklog.summarize.summarize_weekly", boom)
+    text = report.generate_weekly(cfg, week_label="2026-W17").read_text()
+
+    assert "LLM summary unavailable" in text
+    assert "## Time breakdown" in text
+    assert "Wed 2026-04-22: 2.0h" in text
+    assert "raw evidence" in text

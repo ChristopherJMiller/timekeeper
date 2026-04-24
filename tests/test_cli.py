@@ -108,6 +108,31 @@ def test_list_show_and_edit(isolated_cli):
     assert row["note"] == "revised"
 
 
+def test_hours_cmd_prints_breakdown(isolated_cli):
+    _seed_closed_session(isolated_cli["data_dir"], isolated_cli["output_dir"])
+    runner = CliRunner()
+    r = runner.invoke(cli.cli, ["hours", "--week", "2026-W17"])
+    assert r.exit_code == 0, r.output
+    assert "Week of 2026-04-20" in r.output
+    assert "Time breakdown" in r.output
+    assert "Acme: 1.0h" in r.output
+    assert "Tue 2026-04-21: 1.0h" in r.output
+
+
+def test_hours_cmd_unknown_client_errors(isolated_cli):
+    runner = CliRunner()
+    r = runner.invoke(cli.cli, ["hours", "--week", "2026-W17", "--client", "Ghost"])
+    assert r.exit_code != 0
+    assert "Unknown client" in r.output
+
+
+def test_hours_cmd_bad_week_label(isolated_cli):
+    runner = CliRunner()
+    r = runner.invoke(cli.cli, ["hours", "--week", "not-a-week"])
+    assert r.exit_code != 0
+    assert "Bad week label" in r.output
+
+
 def test_abandon_without_active_session_errors(isolated_cli):
     runner = CliRunner()
     r = runner.invoke(cli.cli, ["abandon"])
